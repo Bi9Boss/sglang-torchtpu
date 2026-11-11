@@ -68,7 +68,7 @@ either.
 The plugin provides a native `Lfm3ForCausalLM` for the BF16
 `LiquidAI/LFM3-1.7B` checkpoint. Its reference schema and model code are pinned to
 revision `1da06bec6a819da10b54c67e5c90972b46d81871`. This is an implementation
-under development: full-model TPU generation, numerical comparisons and
+under development: broader TPU validation, numerical comparisons and
 registered TPU coverage have not been completed.
 
 Select `SGLANG_PLATFORM=tpu_oot`, `model_config_parser="lfm3"` and
@@ -118,6 +118,16 @@ engine = sglang.Engine(
 Validation still needs to compare reference logits, full versus chunked
 prefill, multi-step decode, mixed request lengths, slot reuse and compiled
 execution on the TPU. This entry is not a declaration of tested support.
+
+For manual boundary and state-reuse checks, open
+[`lfm3_validation.ipynb`](../test/manual/tpu/lfm3_validation.ipynb) in Colab.
+Run its `baseline` mode, restart the notebook session, then run `chunked`.
+Each mode sends 30 serial requests through one state slot, with prompt lengths
+around 64, 128, 256 and 512 tokens and up to 1024 tokens. The second mode uses
+128-token prefill chunks and compares output token IDs against the saved
+baseline. Both modes keep compilation and prefix reuse disabled. Unique logs
+and incremental JSON reports are written under `/content/lfm3-validation/`;
+this manual check does not replace reference-logit or compiled-path validation.
 
 ## Layout
 
