@@ -122,13 +122,19 @@ class Lfm3Config(PretrainedConfig):
             if not isinstance(factor, (int, float)) or not 0 < factor <= 1:
                 raise ValueError(f"Invalid LFM3 partial_rotary_factor: {factor}.")
 
-    def validate_architecture(self):
+    def validate_layer_type(self):
+        # Transformers remaps legacy "conv" to "linear_attention" for custom
+        # config classes. LFM3's checkpoint schema and ShortConv state selection
+        # both use "conv", so validate our vocabulary without rewriting it.
         if len(self.layer_types) != self.num_hidden_layers:
             raise ValueError("LFM3 layer_types must have num_hidden_layers entries.")
         if any(
             t not in (*self._attention_layer_types, "conv") for t in self.layer_types
         ):
             raise ValueError(f"Unsupported LFM3 layer_types: {self.layer_types}.")
+
+    def validate_architecture(self):
+        self.validate_layer_type()
         if "sliding_attention" in self.layer_types and (
             self.sliding_window is None or self.sliding_window < 2
         ):
