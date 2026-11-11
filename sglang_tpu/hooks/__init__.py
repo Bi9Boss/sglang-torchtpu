@@ -383,6 +383,12 @@ def register() -> None:
     if not current_platform.is_tpu():
         return
 
+    # Config parsers and state specs must exist before launcher-side ModelConfig
+    # construction, which precedes the worker's init_backend().
+    from sglang_tpu.lfm3 import register_lfm3
+
+    register_lfm3()
+
     # Register the tokenizer adapter before tokenizer and worker processor loading.
     from sglang_tpu.models.muse_spark_hf_processor import (
         register_muse_spark_processor,

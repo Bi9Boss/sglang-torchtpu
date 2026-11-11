@@ -67,6 +67,8 @@ def hybrid_linear_kv_pool_state(
 def has_linear_attention(model: nn.Module) -> bool:
     from sglang.srt.models.lfm2 import Lfm2ShortConv
 
+    # The plugin's Lfm3ShortConv inherits this state/weight contract, so its
+    # history is lifted into the graph alongside LFM2's.
     return any(
         isinstance(module, (RadixLinearAttention, Lfm2ShortConv))
         for module in model.modules()

@@ -13,6 +13,7 @@ from sglang.srt.configs.lfm2 import Lfm2Config
 from sglang.srt.layers.attention.hybrid_linear_attn_backend import MambaAttnBackendBase
 from sglang.srt.layers.attention.mamba.mamba2_metadata import ForwardMetadata
 from sglang.srt.runtime_context import get_exec, get_spec
+from sglang_tpu.configs.lfm3 import Lfm3Config
 
 if TYPE_CHECKING:
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch
@@ -41,23 +42,25 @@ class TpuShortConvMetadata(NamedTuple):
 
 
 class TpuShortConvAttnBackend(MambaAttnBackendBase):
-    """State sidecar for causal LFM2, using the existing TPU Mamba pool."""
+    """State sidecar for causal LFM2/LFM3, using the existing TPU Mamba pool."""
 
     needs_cpu_seq_lens = False
 
     def __init__(self, model_runner: ModelRunner):
         super().__init__(model_runner)
-        if not isinstance(model_runner.model_config.hf_config, Lfm2Config):
+        if not isinstance(
+            model_runner.model_config.hf_config, (Lfm2Config, Lfm3Config)
+        ):
             raise NotImplementedError(
-                "The TPU ShortConv sidecar currently implements causal LFM2 only."
+                "The TPU ShortConv sidecar currently implements causal LFM2/LFM3 only."
             )
         if get_spec().speculative_algorithm is not None:
             raise NotImplementedError(
-                "TPU LFM2 ShortConv does not implement speculation."
+                "TPU ShortConv does not implement speculation."
             )
         if get_exec().mamba.enable_mamba_extra_buffer:
             raise NotImplementedError(
-                "TPU LFM2 ShortConv does not implement radix-cache state snapshots. "
+                "TPU ShortConv does not implement radix-cache state snapshots. "
                 "Use --disable-radix-cache."
             )
         self._metadata: Optional[ShortConvTracedMetadata] = None
@@ -69,7 +72,7 @@ class TpuShortConvAttnBackend(MambaAttnBackendBase):
         mode = forward_batch.forward_mode
         if mode.is_target_verify() or mode.is_draft_extend_v2():
             raise NotImplementedError(
-                "TPU LFM2 ShortConv does not implement speculation."
+                "TPU ShortConv does not implement speculation."
             )
         req_rows = forward_batch.req_pool_indices
         slots = self._translate_mamba_indices(

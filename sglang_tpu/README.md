@@ -63,6 +63,62 @@ Unreachable today: MLA with hybrid SWA or an FP4 KV cache takes the plain OOT
 MLA builder in mode B and the generic builders in mode A; no TPU model uses
 either.
 
+## LFM3 functional implementation (validation pending)
+
+The plugin provides a native `Lfm3ForCausalLM` for the BF16
+`LiquidAI/LFM3-1.7B` checkpoint. Its reference schema and model code are pinned to
+revision `1da06bec6a819da10b54c67e5c90972b46d81871`. This is an implementation
+under development: full-model TPU generation, numerical comparisons and
+registered TPU coverage have not been completed.
+
+Select `SGLANG_PLATFORM=tpu_oot`, `model_config_parser="lfm3"` and
+`model_impl="sglang"`. The parser reads the checkpoint JSON into the plugin's
+own config class in each process; no notebook-only Transformers monkey patches
+are required. The launcher registers the config and state spec before loading
+the config, and worker initialization registers the native model.
+
+The initial scope is a single TPU worker, unquantized BF16 weights and BF16 KV,
+with no speculative decoding or P/D disaggregation. Resolution disables radix
+caching. Use `pallas_tpu_rpa_v3` (the default) or `pallas_tpu_rpa_batched` for
+per-layer sliding-window masks. Both attention types currently retain their
+entire KV history in the same pool: the sliding window changes attention, not
+KV storage allocation. Mode A is refused explicitly for this implementation.
+
+The model reuses `Lfm2ShortConv` through `Lfm3ShortConv`, including its width-7
+history, request-state metadata and `direct_compile` state inputs. LFM3-specific
+code implements the per-head sigmoid attention gate, sandwich norms and
+zero-tail partial RoPE using the full-head frequency grid. The weight loader
+checks that every Q/K/V shard and model parameter is present.
+
+For the later Colab validation stage, use an ordinary Python cell in the
+already-installed notebook environment, with the platform selected before
+importing SGLang:
+
+```python
+import os
+
+os.environ["SGLANG_PLATFORM"] = "tpu_oot"
+
+import sglang
+
+engine = sglang.Engine(
+    model_path="LiquidAI/LFM3-1.7B",
+    revision="1da06bec6a819da10b54c67e5c90972b46d81871",
+    model_config_parser="lfm3",
+    model_impl="sglang",
+    dtype="bfloat16",
+    attention_backend="pallas_tpu_rpa_v3",
+    context_length=512,
+    max_running_requests=1,
+    disable_radix_cache=True,
+    grammar_backend="none",
+)
+```
+
+Validation still needs to compare reference logits, full versus chunked
+prefill, multi-step decode, mixed request lengths, slot reuse and compiled
+execution on the TPU. This entry is not a declaration of tested support.
+
 ## Layout
 
 ```
