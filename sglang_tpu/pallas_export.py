@@ -1,3 +1,4 @@
+import importlib.util
 import inspect
 import threading
 from collections.abc import Callable
@@ -37,15 +38,18 @@ def get_pallas_tpu_device_kind() -> str:
 @contextmanager
 def tpu_info_for_cpu_export():
     """Ensure Pallas kernels receive physical TPU7x hardware metadata during export."""
-    from jax._src import tpu_info as core_tpu_info
     from jax._src.pallas.mosaic import tpu_info
     from jax.experimental.pallas import tpu as pltpu
 
-    # Since JAX 0.11, jax._src.pallas.mosaic.tpu_info only re-exports
-    # jax._src.tpu_info. Mosaic lowering reads the re-export, while tiling
-    # inference and lax lowerings read the core module, so patch both.
+    # Older JAX releases keep TPU metadata in Mosaic. Newer layouts re-export
+    # it from jax._src.tpu_info; patch both when the core module exists because
+    # tiling inference and lax lowerings read it directly.
     patched = ("get_tpu_info", "get_device_kind", "is_tpu_device")
-    modules = (tpu_info, core_tpu_info)
+    modules = (tpu_info,)
+    if importlib.util.find_spec("jax._src.tpu_info") is not None:
+        from jax._src import tpu_info as core_tpu_info
+
+        modules += (core_tpu_info,)
     with _TPU_INFO_PATCH_LOCK:
         original_public = pltpu.get_tpu_info
         originals = [

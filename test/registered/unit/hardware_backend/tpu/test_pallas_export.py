@@ -364,27 +364,51 @@ class TestPallasExportEnvironment(CustomTestCase):
 
     @unittest.skipUnless(importlib.util.find_spec("jax"), "requires JAX")
     def test_cpu_export_context_reports_and_restores_tpu_target(self):
+        """CPU export must work when JAX has no core TPU metadata module."""
+        import jax._src
         from jax._src.pallas.mosaic import tpu_info
         from jax.experimental.pallas import tpu as pltpu
 
+        modules = [tpu_info]
+        if importlib.util.find_spec("jax._src.tpu_info") is not None:
+            from jax._src import tpu_info as core_tpu_info
+
+            modules.append(core_tpu_info)
+
         original_public = pltpu.get_tpu_info
-        original_private = tpu_info.get_tpu_info
-        original_device_kind = tpu_info.get_device_kind
-        original_is_tpu_device = tpu_info.is_tpu_device
+        originals = {
+            module: {
+                name: getattr(module, name)
+                for name in ("get_tpu_info", "get_device_kind", "is_tpu_device")
+            }
+            for module in modules
+        }
 
-        with patch.object(
-            pallas_export, "get_pallas_tpu_device_kind", return_value="TPU7x"
-        ):
-            with pallas_export.tpu_info_for_cpu_export():
-                self.assertEqual(tpu_info.get_device_kind(), "TPU7x")
-                self.assertTrue(tpu_info.is_tpu_device())
-                self.assertEqual(pltpu.get_tpu_info().chip_version.value, "7x")
-                self.assertIs(pltpu.get_tpu_info(), tpu_info.get_tpu_info())
+        for without_core in (False, True):
+            with (
+                self.subTest(without_core=without_core),
+                patch.dict(sys.modules),
+                patch.dict(vars(jax._src)),
+                patch.object(
+                    pallas_export, "get_pallas_tpu_device_kind", return_value="TPU7x"
+                ),
+            ):
+                if without_core:
+                    # Model the pre-move layout even on a newer JAX installation.
+                    sys.modules["jax._src.tpu_info"] = None
+                    vars(jax._src).pop("tpu_info", None)
 
-        self.assertIs(pltpu.get_tpu_info, original_public)
-        self.assertIs(tpu_info.get_tpu_info, original_private)
-        self.assertIs(tpu_info.get_device_kind, original_device_kind)
-        self.assertIs(tpu_info.is_tpu_device, original_is_tpu_device)
+                with pallas_export.tpu_info_for_cpu_export():
+                    self.assertEqual(pltpu.get_tpu_info().chip_version.value, "7x")
+                    for module in modules[:1] if without_core else modules:
+                        self.assertEqual(module.get_device_kind(), "TPU7x")
+                        self.assertTrue(module.is_tpu_device())
+                        self.assertIs(pltpu.get_tpu_info(), module.get_tpu_info())
+
+                self.assertIs(pltpu.get_tpu_info, original_public)
+                for module, original in originals.items():
+                    for name, value in original.items():
+                        self.assertIs(getattr(module, name), value)
 
     @unittest.skipUnless(
         importlib.util.find_spec("jax") and importlib.util.find_spec("torch_tpu"),
