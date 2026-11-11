@@ -35,7 +35,12 @@ def _lfm3_overrides(server_args, hf_config):
     if any(
         getattr(cfg, name) != 1
         for name in (
-            "tp_size", "pp_size", "dp_size", "attn_dp_size", "attn_cp_size", "dcp_size"
+            "tp_size",
+            "pp_size",
+            "dp_size",
+            "attn_dp_size",
+            "attn_cp_size",
+            "dcp_size",
         )
     ):
         raise ValueError("Native TPU LFM3 currently requires a single TPU worker.")
@@ -55,8 +60,7 @@ def _lfm3_overrides(server_args, hf_config):
         cfg.decode_attention_backend,
     )
     if any(
-        b not in (None, "pallas_tpu_rpa_v3", "pallas_tpu_rpa_batched")
-        for b in backends
+        b not in (None, "pallas_tpu_rpa_v3", "pallas_tpu_rpa_batched") for b in backends
     ):
         raise ValueError(
             "Native TPU LFM3 requires a Pallas RPA attention backend "
@@ -92,7 +96,9 @@ def register_lfm3() -> None:
                 "ShortConvHybridAttnBackend"
             ),
             arch_names=["Lfm3ForCausalLM"],
-            uses_mamba_radix_cache=False,
+            # Select the state-aware cache even with prefix reuse disabled:
+            # ChunkCache frees KV rows but does not release ShortConv slots.
+            uses_mamba_radix_cache=True,
             support_mamba_cache=False,
         )
     )

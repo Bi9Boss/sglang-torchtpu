@@ -18,6 +18,23 @@ register_cpu_ci(est_time=5, suite="base-a-test-cpu")
 
 
 class TestLfm3Config(CustomTestCase):
+    def test_shortconv_registers_state_lifecycle_without_prefix_reuse(self):
+        """A one-slot pool must not exhaust after the first completed request.
+
+        The cache builder uses the registry's state-management flag to select
+        UnifiedRadixCache even when radix caching is disabled. ChunkCache has
+        no ShortConv cleanup, so registering only the attention backend leaks
+        the state slot on every request.
+        """
+        from sglang_tpu.lfm3 import register_lfm3
+
+        from sglang.srt.configs.linear_attn_model_registry import get_linear_attn_config
+
+        register_lfm3()
+        spec, _ = get_linear_attn_config(Lfm3Config())
+        self.assertTrue(spec.uses_mamba_radix_cache)
+        self.assertFalse(spec.support_mamba_cache)
+
     def test_shortconv_layers_survive_validation_and_serialization(self):
         cases = (
             (Lfm3Config(), [0, 1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23]),
