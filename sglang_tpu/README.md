@@ -66,7 +66,8 @@ semantics.
 
 Run the registered numerical test on a TPU with
 `SGLANG_PLATFORM=tpu_oot python test/registered/kernels/ops/mamba/test_tpu_short_conv.py`.
-For a warmup-separated comparison against the current torch reference path,
+For a warmup-separated comparison against the historical torch implementation
+(kept only in the benchmark, not used by the runtime),
 use `python test/manual/kernels/bench_lfm2_short_conv_tpu.py --mode both`.
 Initial TPU v6e-1 validation with public `torch-tpu==0.2.0` passed single-request
 decode after converting bridge indices to int32, but exposed prefill DMA

@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """ShortConv outputs and persistent history against a grouped-conv1d reference.
 
-CPU cases check the math; the TPU registration also exercises device lowering
-and in-place state writes. No model weights or server are needed.
+CPU cases interpret the Pallas kernel; TPU cases exercise device lowering and
+in-place state writes. No model weights or server are needed.
 """
 
 import importlib.util
@@ -51,9 +51,15 @@ def _reference(x, weight, bias, state, slots, lengths, has_prefix):
     return output, next_state
 
 
-class TestShortConvCPU(CustomTestCase):
-    device = "cpu"
-    channels = 5
+@unittest.skipUnless(importlib.util.find_spec("torch_tpu"), "requires torch_tpu")
+class TestShortConvTPU(CustomTestCase):
+    device = "tpu"
+    channels = 128
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        import torch_tpu  # noqa: F401
 
     def setUp(self):
         self.generator = torch.Generator().manual_seed(42)
@@ -63,19 +69,11 @@ class TestShortConvCPU(CustomTestCase):
 
     def _prefill(self, x, weight, bias, state, slots, lengths, has_prefix):
         boundaries = [0, *itertools.accumulate(lengths)]
-        requests = [row for row, length in enumerate(lengths) for _ in range(length)]
-        padding = x.shape[0] - len(requests)
         metadata = TpuShortConvMetadata(
             layer_cache=SimpleNamespace(conv=[state]),
             cache_indices=torch.tensor(slots, device=self.device),
             query_start_loc=torch.tensor(boundaries, device=self.device),
             has_initial_state=torch.tensor(has_prefix, device=self.device),
-            token_request_indices=torch.tensor(
-                requests + [0] * padding, dtype=torch.int64, device=self.device
-            ),
-            valid_tokens=torch.tensor(
-                [True] * len(requests) + [False] * padding, device=self.device
-            ),
         )
         return short_conv(x, weight, bias, metadata, ForwardMode.EXTEND)
 
@@ -131,8 +129,6 @@ class TestShortConvCPU(CustomTestCase):
                 torch.tensor(slots, device=self.device),
                 torch.arange(5, device=self.device),
                 None,
-                None,
-                None,
             )
             actual = short_conv(
                 x.to(self.device),
@@ -170,8 +166,6 @@ class TestShortConvCPU(CustomTestCase):
             torch.tensor([2], device=self.device),
             torch.tensor([0, 1], device=self.device),
             None,
-            None,
-            None,
         )
         pieces.append(
             short_conv(
@@ -198,6 +192,84 @@ class TestShortConvCPU(CustomTestCase):
             [False, False, False],
         )
         self._assert_result(actual, state, torch.zeros(4, channels), initial)
+
+    def test_compiled_prefill_replays_lengths_slots_and_prefix_flags(self):
+        """Tile halos and donated state stay correct across one graph bucket."""
+        from sglang_tpu.kernels.mamba.short_conv import build_short_conv_op
+
+        op = torch.compile(
+            build_short_conv_op(), backend="tpu", fullgraph=True, dynamic=False
+        )
+        # 768 channels also exercises bias partitions: a 384-element 1D block
+        # cannot lower even though it is a multiple of the 128-channel lane.
+        for channels in (768, 1536):
+            with self.subTest(channels=channels):
+                weight = self._randn(channels, 3, dtype=torch.bfloat16)
+                bias = self._randn(channels, dtype=torch.bfloat16)
+                expected_state = self._randn(7, 2, 1, channels)
+                state = expected_state.clone().to(self.device)
+                weight_t, bias_t = weight.to(self.device), bias.to(self.device)
+                for lengths, slots, prefix in (
+                    (
+                        [1, 0, 65, 129, 3],
+                        [3, 2, 1, 4, 0],
+                        [False, True, True, False, False],
+                    ),
+                    (
+                        [63, 2, 1, 129, 0],
+                        [4, 3, 2, 1, 0],
+                        [True, True, False, True, False],
+                    ),
+                    ([0, 0, 0, 0, 0], [0, 0, 0, 0, 0], [False] * 5),
+                ):
+                    x = self._randn(256, channels, dtype=torch.bfloat16)
+                    expected, expected_state = _reference(
+                        x, weight, bias, expected_state, slots, lengths, prefix
+                    )
+                    actual = op(
+                        x.to(self.device),
+                        weight_t,
+                        bias_t,
+                        state,
+                        torch.tensor(slots, device=self.device),
+                        torch.tensor(
+                            [0, *itertools.accumulate(lengths)], device=self.device
+                        ),
+                        torch.tensor(prefix, device=self.device),
+                        False,
+                    )
+                    self._assert_result(actual, state, expected, expected_state)
+
+    def test_compiled_decode_partial_vector_tile_keeps_state_across_replays(self):
+        from sglang_tpu.kernels.mamba.short_conv import build_short_conv_op
+
+        op = torch.compile(
+            build_short_conv_op(), backend="tpu", fullgraph=True, dynamic=False
+        )
+        channels = 2048
+        weight = self._randn(channels, 4)
+        expected_state = self._randn(12, 3, 1, channels)
+        state = expected_state.clone().to(self.device)
+        weight_t = weight.to(self.device)
+        for slots in (
+            [3, 0, 1, 4, 5, 6, 7, 8, 2, 0],
+            [2, 8, 0, 7, 6, 5, 4, 1, 0, 3],
+        ):
+            x = self._randn(10, channels)
+            expected, expected_state = _reference(
+                x, weight, None, expected_state, slots, [1] * 10, [True] * 10
+            )
+            actual = op(
+                x.to(self.device),
+                weight_t,
+                None,
+                state,
+                torch.tensor(slots, device=self.device),
+                None,
+                None,
+                True,
+            )
+            self._assert_result(actual, state, expected, expected_state)
 
 
 @unittest.skipUnless(importlib.util.find_spec("jax"), "requires JAX interpreter")
@@ -283,96 +355,6 @@ class TestShortConvPallasInterpreter(CustomTestCase):
                     rtol=0,
                     atol=0,
                 )
-
-
-@unittest.skipUnless(importlib.util.find_spec("torch_tpu"), "requires torch_tpu")
-class TestShortConvTPU(TestShortConvCPU):
-    device = "tpu"
-    # Exercise the same boundary/state cases at a DMA-aligned channel width.
-    channels = 128
-
-    @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
-        import torch_tpu  # noqa: F401
-
-    def test_compiled_prefill_replays_lengths_slots_and_prefix_flags(self):
-        """Tile halos and donated state stay correct across one graph bucket."""
-        from sglang_tpu.kernels.mamba.short_conv import build_short_conv_op
-
-        op = torch.compile(
-            build_short_conv_op(), backend="tpu", fullgraph=True, dynamic=False
-        )
-        # 768 channels also exercises bias partitions: a 384-element 1D block
-        # cannot lower even though it is a multiple of the 128-channel lane.
-        for channels in (768, 1536):
-            with self.subTest(channels=channels):
-                weight = self._randn(channels, 3, dtype=torch.bfloat16)
-                bias = self._randn(channels, dtype=torch.bfloat16)
-                expected_state = self._randn(7, 2, 1, channels)
-                state = expected_state.clone().to(self.device)
-                weight_t, bias_t = weight.to(self.device), bias.to(self.device)
-                for lengths, slots, prefix in (
-                    (
-                        [1, 0, 65, 129, 3],
-                        [3, 2, 1, 4, 0],
-                        [False, True, True, False, False],
-                    ),
-                    (
-                        [63, 2, 1, 129, 0],
-                        [4, 3, 2, 1, 0],
-                        [True, True, False, True, False],
-                    ),
-                    ([0, 0, 0, 0, 0], [0, 0, 0, 0, 0], [False] * 5),
-                ):
-                    x = self._randn(256, channels, dtype=torch.bfloat16)
-                    expected, expected_state = _reference(
-                        x, weight, bias, expected_state, slots, lengths, prefix
-                    )
-                    actual = op(
-                        x.to(self.device),
-                        weight_t,
-                        bias_t,
-                        state,
-                        torch.tensor(slots, device=self.device),
-                        torch.tensor(
-                            [0, *itertools.accumulate(lengths)], device=self.device
-                        ),
-                        torch.tensor(prefix, device=self.device),
-                        False,
-                    )
-                    self._assert_result(actual, state, expected, expected_state)
-
-    def test_compiled_decode_partial_vector_tile_keeps_state_across_replays(self):
-        from sglang_tpu.kernels.mamba.short_conv import build_short_conv_op
-
-        op = torch.compile(
-            build_short_conv_op(), backend="tpu", fullgraph=True, dynamic=False
-        )
-        channels = 2048
-        weight = self._randn(channels, 4)
-        expected_state = self._randn(12, 3, 1, channels)
-        state = expected_state.clone().to(self.device)
-        weight_t = weight.to(self.device)
-        for slots in (
-            [3, 0, 1, 4, 5, 6, 7, 8, 2, 0],
-            [2, 8, 0, 7, 6, 5, 4, 1, 0, 3],
-        ):
-            x = self._randn(10, channels)
-            expected, expected_state = _reference(
-                x, weight, None, expected_state, slots, [1] * 10, [True] * 10
-            )
-            actual = op(
-                x.to(self.device),
-                weight_t,
-                None,
-                state,
-                torch.tensor(slots, device=self.device),
-                None,
-                None,
-                True,
-            )
-            self._assert_result(actual, state, expected, expected_state)
 
 
 if __name__ == "__main__":

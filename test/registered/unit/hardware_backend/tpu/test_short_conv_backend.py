@@ -16,7 +16,7 @@ from sglang.srt.layers.attention.hybrid_linear_attn_backend import (
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.test.ci.ci_register import register_cpu_ci, register_tpu_ci
 from sglang.test.test_utils import CustomTestCase
-from sglang_tpu.attention_short_conv import TpuShortConvAttnBackend, short_conv
+from sglang_tpu.attention_short_conv import TpuShortConvAttnBackend
 from sglang_tpu.compilation.hybrid_linear_direct_compile import (
     bind_traced_attention_metadata,
     traced_attention_metadata,
@@ -58,9 +58,7 @@ def _backend(device="cpu"):
 class TestShortConvBackend(CustomTestCase):
     def test_no_buffer_cow_copies_shortconv_state(self):
         """Radix COW must copy the conv-only LFM2 state row."""
-        source = torch.arange(4 * 2 * 1 * 3, dtype=torch.float32).reshape(
-            4, 2, 1, 3
-        )
+        source = torch.arange(4 * 2 * 1 * 3, dtype=torch.float32).reshape(4, 2, 1, 3)
         state = TpuPerLayerState(
             conv=[[source.clone()]],
             temporal=[torch.empty((4, 1, 0, 3), dtype=torch.float32)],
@@ -72,7 +70,7 @@ class TestShortConvBackend(CustomTestCase):
 
         torch.testing.assert_close(state.conv[0][0][3], source[1])
 
-    def test_padded_prefill_maps_tokens_and_physical_slots(self):
+    def test_padded_prefill_maps_boundaries_and_physical_slots(self):
         backend = _backend()
         batch = SimpleNamespace(
             forward_mode=ForwardMode.EXTEND,
@@ -88,13 +86,6 @@ class TestShortConvBackend(CustomTestCase):
         self.assertEqual(metadata.query_start_loc.tolist(), [0, 2, 2, 3, 3, 3])
         self.assertEqual(
             metadata.has_initial_state.tolist(), [False, False, True, False, False]
-        )
-        self.assertEqual(
-            metadata.token_request_indices.tolist(), [0, 0, 2, 0, 0, 0, 0, 0]
-        )
-        self.assertEqual(
-            metadata.valid_tokens.tolist(),
-            [True, True, True, False, False, False, False, False],
         )
 
     def test_decode_refreshes_slots_within_the_same_batch_bucket(self):
@@ -112,25 +103,9 @@ class TestShortConvBackend(CustomTestCase):
         self.assertEqual(current.cache_indices.tolist(), [1, 3, 0, 0])
         self.assertEqual(current.query_start_loc.tolist(), [0, 1, 2, 3, 4])
 
-        state = backend.conv_state_metadata(9, batch).layer_cache.conv[0]
-        previous = state.clone()
-        actual = short_conv(
-            torch.ones(4, 3),
-            torch.ones(3, 3),
-            None,
-            backend.conv_state_metadata(9, batch),
-            ForwardMode.DECODE,
+        self.assertIs(
+            backend.conv_state_metadata(9, batch).cache_indices, current.cache_indices
         )
-        expected = torch.stack(
-            (
-                previous[1, :, 0].sum(0) + 1,
-                previous[3, :, 0].sum(0) + 1,
-                torch.zeros(3),
-                torch.zeros(3),
-            )
-        )
-        torch.testing.assert_close(actual, expected)
-        torch.testing.assert_close(state[[0, 2, 4]], previous[[0, 2, 4]])
 
     def test_traced_metadata_restores_after_error_and_keeps_layers_separate(self):
         backend = _backend()
@@ -151,27 +126,33 @@ class TestShortConvBackend(CustomTestCase):
         current_full = full_backend.forward_metadata
         current = backend.traced_metadata()
         other_layer = backend.conv_state_metadata(4, batch).layer_cache.conv[0]
-        other_before = other_layer.clone()
         state = backend.conv_state_metadata(9, batch).layer_cache.conv[0]
-        previous = state.clone()
+        self.assertIsNot(state, other_layer)
+        self.assertIs(
+            state, backend.req_to_token_pool.mamba_pool.mamba2_layer_cache(0).conv[0]
+        )
+        self.assertIs(
+            other_layer,
+            backend.req_to_token_pool.mamba_pool.mamba2_layer_cache(1).conv[0],
+        )
 
         with self.assertRaisesRegex(RuntimeError, "trace failed"):
             with bind_traced_attention_metadata(hybrid, captured, ForwardMode.DECODE):
                 self.assertIs(full_backend.forward_metadata, captured[0])
-                actual = short_conv(
-                    torch.ones(1, 3),
-                    torch.ones(3, 3),
-                    None,
-                    hybrid.conv_state_metadata(9, batch),
-                    ForwardMode.DECODE,
+                metadata = hybrid.conv_state_metadata(9, batch)
+                self.assertEqual(metadata.cache_indices.tolist(), [1])
+                self.assertIs(metadata.layer_cache.conv[0], state)
+                self.assertIs(
+                    hybrid.conv_state_metadata(4, batch).layer_cache.conv[0],
+                    other_layer,
                 )
-                torch.testing.assert_close(actual[0], previous[1, :, 0].sum(0) + 1)
                 raise RuntimeError("trace failed")
 
         self.assertIs(backend.traced_metadata(), current)
         self.assertIs(full_backend.forward_metadata, current_full)
-        torch.testing.assert_close(state[[0, 2, 3, 4]], previous[[0, 2, 3, 4]])
-        torch.testing.assert_close(other_layer, other_before)
+        self.assertEqual(
+            hybrid.conv_state_metadata(9, batch).cache_indices.tolist(), [3]
+        )
 
     def test_speculative_modes_fail_before_mutating_state(self):
         backend = _backend()
@@ -197,14 +178,10 @@ def _check_tpu_metadata():
     for actual, expected in (
         (metadata.cache_indices, [3, 2, 1, 0, 0]),
         (metadata.query_start_loc, [0, 128, 128, 193, 196, 196]),
-        (metadata.token_request_indices, [0] * 128 + [2] * 65 + [3] * 3 + [0] * 60),
     ):
         torch.testing.assert_close(
             actual.cpu(), torch.tensor(expected), check_dtype=False
         )
-    torch.testing.assert_close(
-        metadata.valid_tokens.cpu(), torch.tensor([True] * 196 + [False] * 60)
-    )
     torch.testing.assert_close(
         metadata.has_initial_state.cpu(),
         torch.tensor([False, True, True, False, False]),

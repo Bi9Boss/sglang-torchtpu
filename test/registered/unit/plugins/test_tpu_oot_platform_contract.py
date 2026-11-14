@@ -776,14 +776,28 @@ class TestShortConvPlatformKernel(CustomTestCase):
         from sglang.srt.model_executor.forward_batch_info import ForwardMode
         from sglang.srt.models import lfm2
         from sglang.srt.platforms.interface import SRTPlatform
-        from sglang_tpu.attention_short_conv import TpuShortConvMetadata, short_conv
+
+        def cpu_short_conv(x, weight, bias, metadata, forward_mode):
+            assert forward_mode.is_decode()
+            state = metadata.layer_cache.conv[0]
+            slots = metadata.cache_indices
+            history = state.index_select(0, slots).squeeze(2)
+            window = torch.cat((history, x.unsqueeze(1)), dim=1)
+            output = torch.nn.functional.conv1d(
+                window.transpose(1, 2),
+                weight.unsqueeze(1),
+                bias,
+                groups=x.shape[1],
+            ).squeeze(-1)
+            state.index_copy_(0, slots, window[:, 1:].unsqueeze(2))
+            return output
 
         class Platform(SRTPlatform):
             def is_out_of_tree(self):
                 return True
 
             def get_short_conv_kernel(self):
-                return short_conv
+                return cpu_short_conv
 
         class Linear(torch.nn.Linear):
             # Replace the distributed projection boundary with a real CPU GEMM.
@@ -813,13 +827,9 @@ class TestShortConvPlatformKernel(CustomTestCase):
             layer.conv_weight.fill_(1)
 
         state = torch.zeros(2, 2, 1, 3)
-        metadata = TpuShortConvMetadata(
-            SimpleNamespace(conv=[state]),
-            torch.tensor([1]),
-            torch.tensor([0, 1]),
-            None,
-            None,
-            None,
+        metadata = SimpleNamespace(
+            layer_cache=SimpleNamespace(conv=[state]),
+            cache_indices=torch.tensor([1]),
         )
         backend = SimpleNamespace(conv_state_metadata=lambda layer_id, batch: metadata)
         x = torch.tensor([[1.0, 2.0, 3.0]])
