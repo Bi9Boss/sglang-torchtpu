@@ -40,51 +40,22 @@ Open: sparse attention (DSA) models run in mode A only. Mode B refuses them at
 pool construction (`TpuOOTPlatform.get_dsa_kv_pool_cls`), because the OOT DSA
 builder does not say which layers run their own indexer.
 
-The LFM2 causal ShortConv implementation is wired through the OOT platform
-interfaces in mode B only (`SGLANG_PLATFORM=tpu_oot`). Mode A still selects the
-in-tree ShortConv sidecar, which expects stacked GPU-layout state. The mode-B
-implementation includes packed/chunked prefill, decode, padding and per-request
-state updates, including lifting the state and metadata into `direct_compile`.
-The first radix-cache version supports the `no_buffer` strategy with
-`--page-size 1` and `--disable-overlap-schedule`; speculative decoding,
-`extra_buffer`, and paged radix cache remain unsupported. ZAYA1 and the separate
-LFM2-MoE ShortConv implementation are outside this wiring.
+LFM2 causal ShortConv uses Pallas in mode B only (`SGLANG_PLATFORM=tpu_oot`),
+with packed/chunked prefill, decode, and `direct_compile`. Mode A selects the
+in-tree ShortConv sidecar, which expects stacked GPU-layout state.
+Each tensor-parallel partition needs a positive channel count divisible by 128.
 
-The TPU path now uses `sglang_tpu.kernels.mamba.short_conv_pallas` for the
-causal convolution itself. Prefill streams 64-token tiles and their K-1 halo
-through VMEM double buffers; decode packs eight requests into the vector
-sublanes. Prefill stages tokens as `[T, 1, C]` so ragged offsets and the halo
-do not slice the tiled minor dimensions of a DMA buffer. Each tensor-parallel
-partition must have a positive channel count divisible by 128; smaller or
-unaligned widths are rejected before lowering. The custom op donates the
-complete per-layer `[slots, K-1, 1, channels]` FP32 tensor from `TpuMambaPool`,
-so a layer update does not copy or re-layout the pool. Slot 0 remains a
-read-only padding slot.
-The operator still preserves LFM2's existing gate placement (`B*x` before the
-convolution and `C*` after it), FP32 accumulation, output dtype, and bias
-semantics.
+Radix caching requires `--mamba-radix-cache-strategy no_buffer`, `--page-size 1`,
+and `--disable-overlap-schedule`. Speculative decoding, `extra_buffer`, paged
+radix cache, ZAYA1, and LFM2-MoE ShortConv are outside this implementation.
 
-Run the registered numerical test on a TPU with
-`SGLANG_PLATFORM=tpu_oot python test/registered/kernels/ops/mamba/test_tpu_short_conv.py`.
-For a warmup-separated comparison against the historical torch implementation
-(kept only in the benchmark, not used by the runtime),
-use `python test/manual/kernels/bench_lfm2_short_conv_tpu.py --mode both`.
-Initial TPU v6e-1 validation with public `torch-tpu==0.2.0` passed single-request
-decode after converting bridge indices to int32, but exposed prefill DMA
-alignment and multi-request decode mask-lowering failures. The staging and
-mask fixes still need TPU revalidation; CPU Pallas interpretation and offline
-Mosaic lowering do not establish device correctness or performance. Full TPU
-numerical coverage, xprof timings, and speedup measurements remain pending.
+Run the registered kernel test on TPU, or compare against the historical torch
+implementation (benchmark only; warmup excluded):
 
-The following full-model numbers describe the previous torch implementation,
-before Pallas integration. Manual validation completed on one TPU v5e chip with BF16 weights
-and KV cache, TP=1, single-request concurrency, and `torch.compile` disabled.
-GSM8K accuracy was 72.00% on 200 examples (`max_tokens=1536`), with no request
-errors and a 1.50% truncation rate. Serving benchmarks measured 22.08 and 22.93
-output tokens/s for 128/128 and 1024/128 input/output tokens, respectively
-(median of three runs of 32 requests after warmup).
-Compiled full-model execution and registered full-model E2E coverage remain
-pending.
+```bash
+SGLANG_PLATFORM=tpu_oot python test/registered/kernels/ops/mamba/test_tpu_short_conv.py
+python test/manual/kernels/bench_lfm2_short_conv_tpu.py --mode both
+```
 
 Different arm, same outcome for every configuration that runs:
 
