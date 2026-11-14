@@ -45,8 +45,10 @@ interfaces in mode B only (`SGLANG_PLATFORM=tpu_oot`). Mode A still selects the
 in-tree ShortConv sidecar, which expects stacked GPU-layout state. The mode-B
 implementation includes packed/chunked prefill, decode, padding and per-request
 state updates, including lifting the state and metadata into `direct_compile`.
-It currently requires `--disable-radix-cache` and no speculative decoding;
-ZAYA1 and the separate LFM2-MoE ShortConv implementation are outside this wiring.
+The first radix-cache version supports the `no_buffer` strategy with
+`--page-size 1` and `--disable-overlap-schedule`; speculative decoding,
+`extra_buffer`, and paged radix cache remain unsupported. ZAYA1 and the separate
+LFM2-MoE ShortConv implementation are outside this wiring.
 
 The TPU path now uses `sglang_tpu.kernels.mamba.short_conv_pallas` for the
 causal convolution itself. Prefill streams 64-token tiles and their K-1 halo

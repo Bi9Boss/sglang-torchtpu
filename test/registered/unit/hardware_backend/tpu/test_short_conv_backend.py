@@ -21,6 +21,7 @@ from sglang_tpu.compilation.hybrid_linear_direct_compile import (
     bind_traced_attention_metadata,
     traced_attention_metadata,
 )
+from sglang_tpu.mamba_pool import TpuMambaPool, TpuPerLayerState
 
 register_cpu_ci(est_time=5, suite="base-a-test-cpu")
 register_tpu_ci(
@@ -55,6 +56,22 @@ def _backend(device="cpu"):
 
 
 class TestShortConvBackend(CustomTestCase):
+    def test_no_buffer_cow_copies_shortconv_state(self):
+        """Radix COW must copy the conv-only LFM2 state row."""
+        source = torch.arange(4 * 2 * 1 * 3, dtype=torch.float32).reshape(
+            4, 2, 1, 3
+        )
+        state = TpuPerLayerState(
+            conv=[[source.clone()]],
+            temporal=[torch.empty((4, 1, 0, 3), dtype=torch.float32)],
+        )
+        pool = TpuMambaPool.__new__(TpuMambaPool)
+        pool.mamba_cache = state
+
+        pool.copy_from(torch.tensor([1]), torch.tensor([3]))
+
+        torch.testing.assert_close(state.conv[0][0][3], source[1])
+
     def test_padded_prefill_maps_tokens_and_physical_slots(self):
         backend = _backend()
         batch = SimpleNamespace(

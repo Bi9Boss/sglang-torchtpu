@@ -63,8 +63,9 @@ class TpuShortConvAttnBackend(MambaAttnBackendBase):
             )
         if get_exec().mamba.enable_mamba_extra_buffer:
             raise NotImplementedError(
-                "TPU LFM2 ShortConv does not implement radix-cache state snapshots. "
-                "Use --disable-radix-cache."
+                "TPU LFM2 ShortConv does not implement extra_buffer radix-cache "
+                "snapshots. Use --mamba-radix-cache-strategy no_buffer or "
+                "--disable-radix-cache."
             )
         self._metadata: Optional[ShortConvTracedMetadata] = None
         self._decode_query_start_loc: dict[int, torch.Tensor] = {}
@@ -151,7 +152,8 @@ class TpuShortConvAttnBackend(MambaAttnBackendBase):
         self, layer_id: int, forward_batch: ForwardBatch
     ) -> TpuShortConvMetadata:
         # List-index the per-layer buffer, preserving its storage identity for
-        # compiled in-place writes. Radix-state offloading is disabled here.
+        # compiled in-place writes. The no_buffer radix path copies this state
+        # through the shared MambaPool COW operation before the extend.
         pool = self.req_to_token_pool
         layer_cache = pool.mamba_pool.mamba2_layer_cache(pool.mamba_map[layer_id])
         return TpuShortConvMetadata(layer_cache, *self._metadata)

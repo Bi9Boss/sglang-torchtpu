@@ -154,6 +154,13 @@ class TestTpuOOTPlatformContract(CustomTestCase):
                 )
                 self.assertIs(platform.get_short_conv_kernel(), short_conv)
 
+    def test_lfm2_shortconv_claims_no_buffer_prefix_cache_support(self):
+        """LFM2 prefix reuse uses the shared TPU state-copy path."""
+        from sglang.srt.configs.lfm2 import Lfm2Config
+
+        model_config = SimpleNamespace(hf_config=object.__new__(Lfm2Config))
+        self.assertTrue(self.platform.supports_mamba_prefix_cache(model_config))
+
     # -- the gate contract -------------------------------------------------
 
     def test_gate_audit_finds_the_core_gates(self):

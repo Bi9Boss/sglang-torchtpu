@@ -405,6 +405,16 @@ class TpuMambaPool(MambaPool):
             for state in states
         ]
 
+    def _copyable_states(self):
+        """Return state tensors that have a real DMA payload.
+
+        LFM2 is conv-only, so its Mamba2 temporal tensors have zero elements.
+        The TPU state-copy Pallas op cannot issue a zero-byte row copy; those
+        tensors are absent from the COW payload while ``get_state`` keeps the
+        full layout required by direct compilation.
+        """
+        return [state for state in self._copy_states() if state.numel() > 0]
+
     def get_state(self) -> list[torch.Tensor]:
         """The per-layer conv and recurrent tensors the GDN/KDA kernels mutate."""
         return self._copy_states()
@@ -426,9 +436,11 @@ class TpuMambaPool(MambaPool):
     def copy_from(self, src_indices: torch.Tensor, dst_indices: torch.Tensor):
         if src_indices.numel() == 0:
             return
-        # Slot rows only: with extra_buffer radix caching, copies run between
-        # snapshot slots and a request's slot before its extend.
-        states = self._copy_states()
+        # Slot rows only: with no_buffer radix caching, copies run between a
+        # cached prefix slot and a request's slot before its extend.
+        states = self._copyable_states()
+        if not states:
+            return
         if states[0].device.type == "cpu":
             # CPU reference for layout and allocator tests.
             for state in states:
@@ -465,7 +477,10 @@ class TpuMambaPool(MambaPool):
             copy_bucket_size,
         )
 
-        states = self._copy_states()
+        states = self._copyable_states()
+        if not states:
+            self._state_copy_warmed = True
+            return
         # Pool initialization must finish before its buffers are first donated.
         synchronize(states, wait=True)
         size = 8
