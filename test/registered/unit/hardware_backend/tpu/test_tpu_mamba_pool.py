@@ -283,6 +283,44 @@ class TestTpuMambaPool(CustomTestCase):
             [id(t) for t in pool.get_state()], [id(t) for t in replacement]
         )
 
+    def test_compile_state_omits_empty_temporal_buffers(self):
+        """ShortConv's empty recurrent buffers must not become XLA inputs."""
+        shape = Mamba2StateShape.create(
+            tp_world_size=1,
+            intermediate_size=8,
+            n_groups=1,
+            num_heads=0,
+            head_dim=0,
+            state_size=0,
+            conv_kernel=4,
+        )
+        layers = [0, 1]
+        pool = TpuMambaPool(
+            size=2,
+            spec_state_size=0,
+            cache_params=Mamba2CacheParams(
+                dtype=Mamba2StateDType(conv=torch.float32, temporal=torch.float32),
+                layers=layers,
+                shape=shape,
+            ),
+            mamba_layer_ids=layers,
+            device="cpu",
+        )
+
+        public_state = pool.get_state()
+        compile_state = pool.get_state_for_compile()
+        self.assertEqual(len(public_state), 4)
+        self.assertEqual(len(compile_state), 2)
+        self.assertTrue(all(t.numel() > 0 for t in compile_state))
+
+        replacement = [torch.full_like(t, 3) for t in compile_state]
+        pool.set_state_for_compile(replacement)
+        self.assertEqual(
+            [id(t) for t in pool.get_state_for_compile()],
+            [id(t) for t in replacement],
+        )
+        self.assertTrue(all(t.numel() == 0 for t in pool.mamba_cache.temporal))
+
     def test_total_bytes_match_stacked_layout(self):
         """Per-layer allocation must not change the memory footprint."""
         pool = self._pool()

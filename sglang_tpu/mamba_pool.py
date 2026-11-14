@@ -410,14 +410,52 @@ class TpuMambaPool(MambaPool):
 
         LFM2 is conv-only, so its Mamba2 temporal tensors have zero elements.
         The TPU state-copy Pallas op cannot issue a zero-byte row copy; those
-        tensors are absent from the COW payload while ``get_state`` keeps the
-        full layout required by direct compilation.
+        tensors are absent from both the COW payload and the direct-compile
+        state list, while the public ``get_state`` keeps the full cache layout.
         """
         return [state for state in self._copy_states() if state.numel() > 0]
 
     def get_state(self) -> list[torch.Tensor]:
         """The per-layer conv and recurrent tensors the GDN/KDA kernels mutate."""
         return self._copy_states()
+
+    def get_state_for_compile(self) -> list[torch.Tensor]:
+        """Return the state tensors that can cross the TPU compile boundary.
+
+        LFM2 is ShortConv-only, so its recurrent state is represented by
+        zero-element tensors.  Those tensors are useful as part of the public
+        cache layout, but TorchTPU cannot lower a zero-element ``f32[0]``
+        argument with a valid layout.  Direct compilation does not need them:
+        ShortConv only reads and mutates the non-empty convolution state.
+        """
+        return self._copyable_states()
+
+    def set_state_for_compile(self, state: list[torch.Tensor]) -> None:
+        """Install a compile-bound state list while retaining empty buffers."""
+        expected = self._copyable_states()
+        if len(state) != len(expected):
+            raise ValueError(
+                "compile state length changed: "
+                f"expected {len(expected)}, got {len(state)}"
+            )
+
+        replacements = iter(state)
+
+        def replace(tensor: torch.Tensor) -> torch.Tensor:
+            return tensor if tensor.numel() == 0 else next(replacements)
+
+        self.mamba_cache = TpuPerLayerState(
+            conv=[
+                [replace(tensor) for tensor in per_layer]
+                for per_layer in self.mamba_cache.conv
+            ],
+            temporal=[replace(tensor) for tensor in self.mamba_cache.temporal],
+        )
+        try:
+            next(replacements)
+        except StopIteration:
+            return
+        raise ValueError("compile state contains more tensors than expected")
 
     def set_state(self, state: list[torch.Tensor]) -> None:
         """Install a list laid out like get_state."""
