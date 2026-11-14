@@ -770,12 +770,38 @@ class TestTpuPatchInventory(CustomTestCase):
 
 class TestShortConvPlatformKernel(CustomTestCase):
     def test_lfm2_uses_the_platform_kernel_between_its_gates(self):
-        """A CPU fake platform exercises the OOT seam without device setup."""
+        """In-tree overrides must reach the same sidecar and kernel as OOT ones."""
+        for out_of_tree in (False, True):
+            with self.subTest(out_of_tree=out_of_tree):
+                self._check_lfm2_platform_kernel(out_of_tree)
+
+    def _check_lfm2_platform_kernel(self, out_of_tree):
         import torch
 
+        from sglang.srt.configs.lfm2 import Lfm2Config
+        from sglang.srt.layers.attention import attention_registry
+        from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
         from sglang.srt.model_executor.forward_batch_info import ForwardMode
         from sglang.srt.models import lfm2
         from sglang.srt.platforms.interface import SRTPlatform
+        from sglang.srt.runtime_context import get_context
+
+        override = get_context().override_server_args(linear_attn_backend="triton")
+        override.install()
+        self.addCleanup(override.restore)
+
+        state = torch.zeros(2, 2, 1, 3)
+        metadata = SimpleNamespace(
+            layer_cache=SimpleNamespace(conv=[state]),
+            cache_indices=torch.tensor([1]),
+        )
+
+        class CpuShortConvBackend(AttentionBackend):
+            def __init__(self, runner):
+                super().__init__()
+
+            def conv_state_metadata(self, layer_id, batch):
+                return metadata
 
         def cpu_short_conv(x, weight, bias, metadata, forward_mode):
             assert forward_mode.is_decode()
@@ -794,7 +820,10 @@ class TestShortConvPlatformKernel(CustomTestCase):
 
         class Platform(SRTPlatform):
             def is_out_of_tree(self):
-                return True
+                return out_of_tree
+
+            def get_short_conv_backend_cls(self):
+                return CpuShortConvBackend
 
             def get_short_conv_kernel(self):
                 return cpu_short_conv
@@ -809,13 +838,32 @@ class TestShortConvPlatformKernel(CustomTestCase):
             def forward(self, x):
                 return super().forward(x), None
 
-        config = SimpleNamespace(hidden_size=3, conv_L_cache=3, conv_bias=False)
+        config = Lfm2Config(
+            hidden_size=3,
+            num_hidden_layers=2,
+            num_attention_heads=1,
+            num_key_value_heads=1,
+            layer_types=["conv", "full_attention"],
+            conv_L_cache=3,
+            conv_bias=False,
+        )
+        full_backend = AttentionBackend()
+        full_backend.req_to_token_pool = None
+        full_backend.token_to_kv_pool = None
+        runner = SimpleNamespace(
+            model_config=SimpleNamespace(hf_config=config, hf_text_config=config),
+            use_mla_backend=False,
+            is_draft_worker=False,
+        )
+        platform = Platform()
         with (
-            patch.object(lfm2, "current_platform", Platform()),
+            patch.object(attention_registry, "current_platform", platform),
+            patch.object(lfm2, "current_platform", platform),
             patch.object(lfm2, "get_parallel", return_value=SimpleNamespace(tp_size=1)),
             patch.object(lfm2, "MergedColumnParallelLinear", Linear),
             patch.object(lfm2, "RowParallelLinear", Linear),
         ):
+            backend = attention_registry.attn_backend_wrapper(runner, full_backend)
             layer = lfm2.Lfm2ShortConv(config, layer_idx=0)
 
         with torch.no_grad():
@@ -826,12 +874,6 @@ class TestShortConvPlatformKernel(CustomTestCase):
             layer.out_proj.weight.copy_(identity)
             layer.conv_weight.fill_(1)
 
-        state = torch.zeros(2, 2, 1, 3)
-        metadata = SimpleNamespace(
-            layer_cache=SimpleNamespace(conv=[state]),
-            cache_indices=torch.tensor([1]),
-        )
-        backend = SimpleNamespace(conv_state_metadata=lambda layer_id, batch: metadata)
         x = torch.tensor([[1.0, 2.0, 3.0]])
         batch = SimpleNamespace(forward_mode=ForwardMode.DECODE)
         with (

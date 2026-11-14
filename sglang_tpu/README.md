@@ -40,23 +40,6 @@ Open: sparse attention (DSA) models run in mode A only. Mode B refuses them at
 pool construction (`TpuOOTPlatform.get_dsa_kv_pool_cls`), because the OOT DSA
 builder does not say which layers run their own indexer.
 
-LFM2 causal ShortConv uses Pallas in mode B only (`SGLANG_PLATFORM=tpu_oot`),
-with packed/chunked prefill, decode, and `direct_compile`. Mode A selects the
-in-tree ShortConv sidecar, which expects stacked GPU-layout state.
-Each tensor-parallel partition needs a positive channel count divisible by 128.
-
-Radix caching requires `--mamba-radix-cache-strategy no_buffer`, `--page-size 1`,
-and `--disable-overlap-schedule`. Speculative decoding, `extra_buffer`, paged
-radix cache, ZAYA1, and LFM2-MoE ShortConv are outside this implementation.
-
-Run the registered kernel test on TPU, or compare against the historical torch
-implementation (benchmark only; warmup excluded):
-
-```bash
-SGLANG_PLATFORM=tpu_oot python test/registered/kernels/ops/mamba/test_tpu_short_conv.py
-python test/manual/kernels/bench_lfm2_short_conv_tpu.py --mode both
-```
-
 Different arm, same outcome for every configuration that runs:
 
 - `--prefill-only-disable-kv-cache`: the pool-family check refuses OOT pools,
@@ -70,6 +53,24 @@ Different arm, same outcome for every configuration that runs:
 Unreachable today: MLA with hybrid SWA or an FP4 KV cache takes the plain OOT
 MLA builder in mode B and the generic builders in mode A; no TPU model uses
 either.
+
+## LFM2 ShortConv
+
+Both modes (`SGLANG_PLATFORM=tpu` or `tpu_oot`) use the same Pallas ShortConv
+backend and kernels, with packed/chunked prefill, decode, and `direct_compile`.
+Each tensor-parallel partition needs a positive channel count divisible by 128.
+
+Radix caching requires `--mamba-radix-cache-strategy no_buffer`, `--page-size 1`,
+and `--disable-overlap-schedule`. Speculative decoding, `extra_buffer`, paged
+radix cache, ZAYA1, and LFM2-MoE ShortConv are outside this implementation.
+
+Run the registered kernel test on TPU, or compare against the historical torch
+implementation (benchmark only; warmup excluded):
+
+```bash
+SGLANG_PLATFORM=tpu python test/registered/kernels/ops/mamba/test_tpu_short_conv.py
+python test/manual/kernels/bench_lfm2_short_conv_tpu.py --mode both
+```
 
 ## Layout
 

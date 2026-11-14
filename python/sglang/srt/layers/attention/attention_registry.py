@@ -522,16 +522,10 @@ def attn_backend_wrapper(runner: "ModelRunner", full_attn_backend: "AttentionBac
                 from sglang.srt.layers.attention.hybrid_linear_attn_backend import (
                     ShortConvHybridAttnBackend,
                 )
-                from sglang.srt.layers.attention.linear.short_conv_backend import (
-                    ShortConvAttnBackend,
-                )
 
-                if current_platform.is_out_of_tree():
-                    linear_attn_backend = current_platform.get_short_conv_backend_cls()(
-                        runner
-                    )
-                else:
-                    linear_attn_backend = ShortConvAttnBackend(runner)
+                linear_attn_backend = current_platform.get_short_conv_backend_cls()(
+                    runner
+                )
                 hybrid_backend_cls = ShortConvHybridAttnBackend
             else:
                 linear_attn_backend = Mamba2AttnBackend(runner)

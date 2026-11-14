@@ -315,11 +315,7 @@ class Lfm2ShortConv(nn.Module):
             self.register_parameter("conv_bias", None)
 
         register_shortconv_verify_buffers(self)
-        self._short_conv_kernel = (
-            current_platform.get_short_conv_kernel()
-            if current_platform.is_out_of_tree()
-            else None
-        )
+        self._short_conv_kernel = current_platform.get_short_conv_kernel()
 
     def forward(
         self,
